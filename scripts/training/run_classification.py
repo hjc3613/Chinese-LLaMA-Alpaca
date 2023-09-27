@@ -28,12 +28,14 @@ import sys
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(ROOT_DIR)
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union, Tuple
 from pathlib import Path
 import datasets
 import torch
-from build_dataset import build_instruction_dataset, DataCollatorForSupervisedDataset
+from build_dataset_classification import build_instruction_dataset, DataCollatorForSupervisedDataset
 import transformers
+import torch.nn as nn
+from transformers.modeling_outputs import SequenceClassifierOutput
 from transformers import (
     CONFIG_MAPPING,
     AutoConfig,
@@ -46,8 +48,14 @@ from transformers import (
     TrainingArguments,
     set_seed,
     GenerationConfig,
-    BitsAndBytesConfig
+    BitsAndBytesConfig,
+    BertModel,
+    BertForSequenceClassification,
+    BertTokenizer,
+    BertPreTrainedModel
 )
+from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import send_example_telemetry
 from transformers.utils.versions import require_version
@@ -55,7 +63,6 @@ from transformers.utils.versions import require_version
 from peft import LoraConfig, TaskType, get_peft_model, PeftModel, get_peft_model_state_dict, AdaLoraModel, AdaLoraConfig
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 from uni_gpt.modeling_unigpt import UniGPTForCausalLM
-from baichuan.tokenization_baichuan import BaichuanTokenizer
 IGNORE_INDEX = -100
 DEFAULT_PAD_TOKEN = "[PAD]"
 DEFAULT_EOS_TOKEN = "</s>"
@@ -85,6 +92,109 @@ class SavePeftModelCallback(transformers.TrainerCallback):
         kwargs["model"].save_pretrained(peft_model_path)
         kwargs["tokenizer"].save_pretrained(peft_model_path)
 
+class SentenceBert(BertPreTrainedModel):
+    def __init__(self, config):
+        super().__init__(config)
+        self.num_labels = config.num_labels
+        self.config = config
+
+        self.bert = BertModel(config)
+        classifier_dropout = (
+            config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
+        )
+        self.dropout = nn.Dropout(classifier_dropout)
+        self.classifier = nn.Linear(config.hidden_size*3, config.num_labels)
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def forward(
+        self,
+        input_ids_a: Optional[torch.Tensor] = None,
+        input_ids_b: Optional[torch.Tensor] = None,
+        attention_mask_a: Optional[torch.Tensor] = None,
+        attention_mask_b: Optional[torch.Tensor] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        head_mask: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutput]:
+        r"""
+        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+            Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
+            config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
+            `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs_a = self.bert(
+            input_ids_a,
+            attention_mask=attention_mask_a,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        outputs_b = self.bert(
+            input_ids_b,
+            attention_mask=attention_mask_b,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        pooled_output_a = outputs_a[1]
+        pooled_output_b = outputs_b[1]
+
+        pooled_output_a = self.dropout(pooled_output_a)
+        pooled_output_b = self.dropout(pooled_output_b)
+        diff_a_b = torch.abs(pooled_output_a - pooled_output_b)
+        concated = torch.concat([pooled_output_a, pooled_output_b, diff_a_b], axis=-1)
+        logits = self.classifier(concated)
+
+        loss = None
+        if labels is not None:
+            if self.config.problem_type is None:
+                if self.num_labels == 1:
+                    self.config.problem_type = "regression"
+                elif self.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
+                    self.config.problem_type = "single_label_classification"
+                else:
+                    self.config.problem_type = "multi_label_classification"
+
+            if self.config.problem_type == "regression":
+                loss_fct = MSELoss()
+                if self.num_labels == 1:
+                    loss = loss_fct(logits.squeeze(), labels.squeeze())
+                else:
+                    loss = loss_fct(logits, labels)
+            elif self.config.problem_type == "single_label_classification":
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            elif self.config.problem_type == "multi_label_classification":
+                loss_fct = BCEWithLogitsLoss()
+                loss = loss_fct(logits, labels)
+        if not return_dict:
+            output = (logits,) + outputs_a[2:]
+            return ((loss,) + output) if loss is not None else output
+
+        return SequenceClassifierOutput(
+            loss=loss,
+            logits=logits,
+            # hidden_states=outputs.hidden_states,
+            # attentions=outputs.attentions,
+        )
 
 @dataclass
 class ModelArguments:
@@ -278,18 +388,7 @@ def main():
         "use_auth_token": True if model_args.use_auth_token else None,
         "trust_remote_code":True
     }
-    if model_args.config_name:
-        config = AutoConfig.from_pretrained(model_args.config_name, **config_kwargs)
-    elif model_args.model_name_or_path:
-        print(f'from {model_args.model_name_or_path} load pretrained model config')
-        config = AutoConfig.from_pretrained(model_args.model_name_or_path, **config_kwargs)
-    else:
-        config = CONFIG_MAPPING[model_args.model_type]()
-        logger.warning("You are instantiating a new config instance from scratch.")
-        if model_args.config_overrides is not None:
-            logger.info(f"Overriding config: {model_args.config_overrides}")
-            config.update_from_string(model_args.config_overrides)
-            logger.info(f"New config: {config}")
+    model = SentenceBert.from_pretrained(model_args.model_name_or_path, num_labels=1)
 
     tokenizer_kwargs = {
         "cache_dir": model_args.cache_dir,
@@ -298,9 +397,9 @@ def main():
         "use_auth_token": True if model_args.use_auth_token else None,
     }
     if model_args.tokenizer_name:
-        tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name, **tokenizer_kwargs)
+        tokenizer = BertTokenizer.from_pretrained(model_args.tokenizer_name, **tokenizer_kwargs)
     elif model_args.tokenizer_name_or_path:
-        tokenizer = BaichuanTokenizer.from_pretrained(model_args.tokenizer_name_or_path, **tokenizer_kwargs)
+        tokenizer = BertTokenizer.from_pretrained(model_args.tokenizer_name_or_path, **tokenizer_kwargs)
     else:
         raise ValueError(
             "You are instantiating a new tokenizer from scratch. This is not supported by this script."
@@ -315,13 +414,6 @@ def main():
         tokenizer.add_special_tokens(dict(pad_token=DEFAULT_PAD_TOKEN))
 
     logger.info(f"len(tokenizer):{len(tokenizer)}")
-    if data_args.add_words_file:
-        with open(data_args.add_words_file, encoding='utf8') as f:
-            words = [i.strip() for i in f.readlines() if i.strip()]
-        tokenizer.add_tokens(words)
-        print('测试是否添加词汇成功：\n')
-        print('输入:\n', '_'.join(words))
-        print('输出:\n', tokenizer.tokenize('_'.join(words)))
 
     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
     eval_dataset=None
@@ -368,90 +460,6 @@ def main():
         # for idx in range(1):
         #     logger.info(tokenizer.decode(eval_dataset[idx]['input_ids']))
         #     logger.info("*"*100)
-
-    if model_args.model_name_or_path:
-        torch_dtype = (
-            model_args.torch_dtype
-            if model_args.torch_dtype in ["auto", None]
-            else getattr(torch, model_args.torch_dtype)
-        )
-        model = AutoModelForCausalLM.from_pretrained(
-            model_args.model_name_or_path,
-            from_tf=bool(".ckpt" in model_args.model_name_or_path),
-            config=config,
-            cache_dir=model_args.cache_dir,
-            revision=model_args.model_revision,
-            use_auth_token=True if model_args.use_auth_token else None,
-            torch_dtype=torch_dtype,
-            low_cpu_mem_usage=False, # deepspeed stage3 时要设置为false
-            trust_remote_code=True,
-            # load_in_4bit=True,
-            # load_in_8bit=False,
-            # quantization_config=BitsAndBytesConfig(
-            #     load_in_8bit=False,
-            #     load_in_4bit=True,
-            #     llm_int8_threshold=6.0,
-            #     llm_int8_has_fp16_weight=False,
-            #     bnb_4bit_compute_dtype=torch_dtype,
-            #     bnb_4bit_use_double_quant=True,
-            #     bnb_4bit_quant_type='nf4',
-            # )
-        )
-    else:
-        model: UniGPTForCausalLM = AutoModelForCausalLM.from_config(config)
-        n_params = sum({p.data_ptr(): p.numel() for p in model.parameters()}.values())
-        logger.info(f"Training new model from scratch - Total size={n_params/2**20:.2f}M params")
-
-    
-
-    embedding_size = model.get_input_embeddings().weight.shape[0]
-
-    if len(tokenizer) != embedding_size:
-        logger.info("resize the embedding size by the size of the tokenizer")
-        model.resize_token_embeddings(len(tokenizer))
-        # fix embedding weights for new added tokens
-        # model.get_input_embeddings().weight.requires_grad = False
-        with torch.no_grad():
-            for idx, tok in tokenizer.added_tokens_decoder.items():
-                print('添加新token', tok)
-                vec = model.get_input_embeddings().weight[tokenizer.convert_tokens_to_ids(list(tok))].mean(dim=0)
-                model.get_input_embeddings().weight[idx,:] = vec
-        # model.get_input_embeddings().weight.requires_grad = True
-    if model_args.lora:
-        logger.warn("lora 微调......")
-        if training_args.peft_path is not None:
-            logger.info("Peft from pre-trained model")
-            model = PeftModel.from_pretrained(model, training_args.peft_path)
-        else:
-            logger.info("Init new peft model")
-            target_modules = training_args.trainable.split(',')
-            modules_to_save = training_args.modules_to_save
-            if modules_to_save is not None:
-                modules_to_save = modules_to_save.split(',')
-            lora_rank = training_args.lora_rank
-            lora_dropout = training_args.lora_dropout
-            lora_alpha = training_args.lora_alpha
-            logger.info(f"target_modules: {target_modules}")
-            logger.info(f"lora_rank: {lora_rank}")
-            peft_config = LoraConfig(
-                task_type=TaskType.CAUSAL_LM,
-                target_modules=target_modules,
-                inference_mode=False,
-                r=lora_rank, lora_alpha=lora_alpha,
-                lora_dropout=lora_dropout,
-                modules_to_save=modules_to_save)
-            peft_config.save_pretrained(training_args.output_dir)
-            model = get_peft_model(model, peft_config)
-
-        model.print_trainable_parameters()
-        logger.info(f"model.modules_to_save: {model.modules_to_save}")
-    model.tie_weights() # 
-
-    # 下边几行弃用，放开的话，无法保存lora adapter
-    # old_state_dict = model.state_dict
-    # model.state_dict = (
-    #     lambda self, *_, **__: get_peft_model_state_dict(self, old_state_dict())
-    # ).__get__(model, type(model))
 
     # Initialize our Trainer
     trainer = Trainer(
