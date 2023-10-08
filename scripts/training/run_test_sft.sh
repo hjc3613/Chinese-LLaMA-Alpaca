@@ -9,9 +9,3 @@ python test_chixu_shengcheng.py \
     --file ${file} \
     --decode_type iter \
     --record_nums ${example_nums}
-
-python test_chixu_shengcheng.py \
-    --model_path ${model_path} \
-    --file ${file} \
-    --decode_type common \
-    --record_nums ${example_nums}

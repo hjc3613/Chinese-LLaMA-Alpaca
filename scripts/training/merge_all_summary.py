@@ -2,9 +2,63 @@ import re
 from collections import OrderedDict
 import traceback
 import copy
+from fuzzywuzzy import process as find_most_similar
+from gensim.models import KeyedVectors
+from enum import Enum
+import jieba
+import numpy as np
+from tqdm import tqdm
+from scipy.special import softmax
+from scipy.spatial import distance
+
+class Method(Enum):
+    fuzzywuzzy = 1
+    gensim = 2
+
+class SimilarVecUtil:
+    def __init__(self, gensim_model_path=None, total_keys=None) -> None:
+        self.gensim_model_path = gensim_model_path
+        if self.gensim_model_path:
+            self.word_vec = self.load_gensim_model()
+        
+        self.total_keys = total_keys
+        self.key_vecs = self.cal_vec_for_each_key()
+        pass
+    
+    def cal_vec_for_each_key(self):
+        result = []
+        for k in self.total_keys:
+            result.append(self.cal_vec_for_key(k))
+        return np.stack(result)
+
+    def load_gensim_model(self):
+        print('loading gensim key word vector......')
+        word_vec:KeyedVectors = KeyedVectors.load_word2vec_format(self.gensim_model_path, binary = False, encoding = 'utf-8', unicode_errors = 'ignore')
+        for k in tqdm(word_vec.key_to_index.keys(), desc='token_add_to_jieba'):
+            jieba.add_word(k)
+        print('loading finished')
+        return word_vec
+    
+    def get_vec_for_field(self, field):
+        field_toks = jieba.lcut(field)
+        field_vecs = np.stack([self.word_vec.get_vector(tok) for tok in field_toks])
+        return np.mean(field_vecs, axis=0)
+    
+    def cal_vec_for_key(self, k):
+        k_fileds = k.split('.')
+        k_fileds_vec = [self.get_vec_for_field(field) for field in k_fileds]
+        # fileds_proportion = softmax(range(len(k_fileds)))
+        # proportion_vecs = np.expand_dims(fileds_proportion, 1)*k_fileds_vec
+        return np.mean(k_fileds_vec, axis=0)
+
+    def gensim_similar(self,k):
+        vec = self.cal_vec_for_key(k)
+        all_dist = distance.cdist(np.expand_dims(vec, 0), self.key_vecs)
+        most_similar_idx = int(np.min(all_dist))
+        return self.total_keys[most_similar_idx]
 
 class ReOrderSummary:
-    def __init__(self, merge_regular, key_positions) -> None:
+    def __init__(self, merge_regular, key_positions, gensim_model_path=None,similary_method=None) -> None:
         with open(merge_regular, encoding='utf8') as f:
             self.key_merge_regular = {line.split('\t')[0]:line.split('\t')[1].strip() for line in f.readlines()}
         ordered_keys = OrderedDict()
@@ -12,6 +66,25 @@ class ReOrderSummary:
             for line in f.readlines():
                 ordered_keys[line.strip()] = ''
         self.ordered_keys = ordered_keys
+        if similary_method == Method.gensim:
+            self.similar_util = SimilarVecUtil(
+                gensim_model_path=gensim_model_path, 
+                total_keys=list(self.ordered_keys.keys())
+            )
+        else:
+            self.similar_util = None
+        self.similary_method = similary_method
+
+    def fuzzywuzzy_similar(self, k):
+        all_std_keys = [k for k,v in self.ordered_keys.items()]
+        result = find_most_similar.extract(k, all_std_keys, limit=1)
+        return result[0][0]
+
+    def convert_to_std_key(self, k):
+        if self.similary_method == Method.fuzzywuzzy:
+            return self.fuzzywuzzy_similar(k)
+        elif self.similary_method == Method.gensim:
+            return self.similar_util.gensim_similar(k)
 
     def post_process_abs(self, all_abstract):
         """
@@ -33,8 +106,11 @@ class ReOrderSummary:
                 k, v = re.split(r':|：', abs, maxsplit=1)
                 if k not in ordered_keys:
                     # 待优化
-                    print('删除键：', abs)
-                    continue
+                    # print('删除键：', abs)
+                    # continue
+                    k_old = k
+                    k = self.convert_to_std_key(k_old)
+                    print(f'键匹配：{k_old} -> {k}')
 
                 # 取{字符串_S, 字符串_M}两种值，S代表单值，后边覆盖前面，M代表多值，要合并
                 merge_type = self.key_merge_regular[re.sub(r'\d+', '1', k)] 
@@ -69,7 +145,7 @@ class ReOrderSummary:
                 time_to_accompany_order[time_order] = new_accompany_order
                 ordered_keys[new_key] = v
 
-            result = [f'{k}:{v}' for k,v in ordered_keys.items() if v.strip()]
+            result = [f'{k}:{v.strip(",")}' for k,v in ordered_keys.items() if v.strip()]
         except:
             traceback.print_exc()
             return all_abstract
@@ -123,6 +199,7 @@ if __name__ == '__main__':
 既往史.疾病史1.疾病名称:过敏性鼻炎
 既往史.其他信息:近2年无荨麻疹
 既往史.疾病史1.疾病名称:头孢过敏
+既往史.疾病史1.病情转归:血压最高达180/90mmHg
 婚育史月经史.月经:月经周期14天，末次月经2023/6/14
 婚育史月经史.月经:末次月经2023-6-24
 婚育史月经史.月经:已绝经
@@ -140,6 +217,8 @@ if __name__ == '__main__':
     '''
     app = ReOrderSummary(
         merge_regular=r'scripts\training\all_summary_keys\merge_regular.tsv',
-        key_positions=r'scripts\training\all_summary_keys\key_position.txt'
+        key_positions=r'scripts\training\all_summary_keys\key_position.txt',
+        gensim_model_path=r'E:\bert_models\chinese_word_vector\sgns.baidubaike.bigram-char.bz2', # Method.gensim 时有效
+        similary_method=Method.fuzzywuzzy # 
     )
     print(app.post_process_abs(all_abstract))
