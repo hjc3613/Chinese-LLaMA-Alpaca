@@ -12,12 +12,12 @@ lora_dropout=0.1
 ROOT="/data/hujunchao"
 # pretrained_model="${ROOT}/medical_record_gen/ckp_chinese_llama_all_param_84训练集_混合训练/checkpoint-64"
 pretrained_model="${ROOT}/models/Baichuan2-13B-Chat"
-strategy=insert_summary_baichun_15_newdata
-dataset_dir=${ROOT}/record_gen/gpt4_continue_gen_new/${strategy}/持续生成_训练集_15_insert.jsonl
-validation_file=${ROOT}/record_gen/gpt4_continue_gen_new/${strategy}/持续生成_测试集_15_insert.jsonl
+strategy=baichuan_histrounds15_filteroutthreash0.06/
+dataset_dir=${ROOT}/record_gen/gpt4_continue_gen_new/${strategy}/train.jsonl
+validation_file=${ROOT}/record_gen/gpt4_continue_gen_new/${strategy}/test.jsonl
 per_device_train_batch_size=2
 per_device_eval_batch_size=1
-gradient_accumulation_steps=5
+gradient_accumulation_steps=4
 output_dir=${ROOT}/models/${strategy}
 # peft_model=path/to/peft/model/dir
 
@@ -27,7 +27,7 @@ deepspeed_config_file=deepspeed_stage2.config
 
 # torchrun --nnodes 1 --nproc_per_node 8 run_clm_sft_with_peft.py \
 # python run_clm_sft_with_peft.py \
-deepspeed --master_port $MASTER_PORT --include localhost:0,1,2,3,4,5 run_clm_sft_with_peft.py \
+deepspeed --master_port $MASTER_PORT --include localhost:0,1,2,3,4,5,6,7 run_clm_sft_with_peft.py \
     --deepspeed ${deepspeed_config_file} \
     --model_name_or_path ${pretrained_model} \
     --tokenizer_name_or_path ${pretrained_model} \
@@ -47,8 +47,8 @@ deepspeed --master_port $MASTER_PORT --include localhost:0,1,2,3,4,5 run_clm_sft
     --save_strategy steps \
     --save_total_limit 1 \
     --evaluation_strategy steps \
-    --eval_steps 36 \
-    --save_steps 36 \
+    --eval_steps 26 \
+    --save_steps 26 \
     --gradient_accumulation_steps ${gradient_accumulation_steps} \
     --preprocessing_num_workers 8 \
     --max_seq_length 4000 \

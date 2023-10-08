@@ -1,6 +1,7 @@
 import re
 from collections import OrderedDict
 import traceback
+import copy
 
 class ReOrderSummary:
     def __init__(self, merge_regular, key_positions) -> None:
@@ -22,6 +23,7 @@ class ReOrderSummary:
         :return:
         """
         try:
+            ordered_keys = copy.deepcopy(self.ordered_keys)
             conflict_main_symptom_keys = []
             time_to_accompany_order = {}
             abs_list = all_abstract.split("\n")
@@ -29,7 +31,7 @@ class ReOrderSummary:
                 if not abs.strip() or not re.search(r':|：', abs):
                     continue
                 k, v = re.split(r':|：', abs, maxsplit=1)
-                if k not in self.ordered_keys:
+                if k not in ordered_keys:
                     # 待优化
                     print('删除键：', abs)
                     continue
@@ -41,8 +43,8 @@ class ReOrderSummary:
 
                 # 主要症状处理逻辑
                 if is_main_symptom:
-                    if not self.ordered_keys[k]:
-                        self.ordered_keys[k] = v
+                    if not ordered_keys[k]:
+                        ordered_keys[k] = v
                     else:
                         # 冲突的主要症状要转换为伴随症状，需考虑序号，先暂存起来
                         conflict_main_symptom_keys.append((k,v))
@@ -50,10 +52,10 @@ class ReOrderSummary:
                 # 其它键处理逻辑
                 else:
                     if merge_type.endswith('_S'):
-                        self.ordered_keys[k] = v
+                        ordered_keys[k] = v
                     elif merge_type.endswith('_M'):
-                        if v not in self.ordered_keys[k]:
-                            self.ordered_keys[k] = f'{self.ordered_keys[k]},{v}'
+                        if v not in ordered_keys[k]:
+                            ordered_keys[k] = f'{ordered_keys[k]},{v}'
                     # 需获取伴随症状序号，用以主要症状的键的更新
                     if '伴随症状' in k:
                         k_fields = k.split('.')
@@ -65,9 +67,9 @@ class ReOrderSummary:
                 new_accompany_order = time_to_accompany_order[time_order] + 1
                 new_key = confict_k.replace('主要症状', f'伴随症状{new_accompany_order}')
                 time_to_accompany_order[time_order] = new_accompany_order
-                self.ordered_keys[new_key] = v
+                ordered_keys[new_key] = v
 
-            result = [f'{k}:{v}' for k,v in self.ordered_keys.items() if v.strip()]
+            result = [f'{k}:{v}' for k,v in ordered_keys.items() if v.strip()]
         except:
             traceback.print_exc()
             return all_abstract

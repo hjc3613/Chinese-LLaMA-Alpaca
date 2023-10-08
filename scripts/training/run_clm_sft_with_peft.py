@@ -276,7 +276,8 @@ def main():
         "cache_dir": model_args.cache_dir,
         "revision": model_args.model_revision,
         "use_auth_token": True if model_args.use_auth_token else None,
-        "trust_remote_code":True
+        "trust_remote_code":True,
+        "use_fast":False
     }
     if model_args.config_name:
         config = AutoConfig.from_pretrained(model_args.config_name, **config_kwargs)
@@ -296,11 +297,13 @@ def main():
         "use_fast": model_args.use_fast_tokenizer,
         "revision": model_args.model_revision,
         "use_auth_token": True if model_args.use_auth_token else None,
+        'trust_remote_code':True,
+        "use_fast":False
     }
     if model_args.tokenizer_name:
         tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name, **tokenizer_kwargs)
     elif model_args.tokenizer_name_or_path:
-        tokenizer = BaichuanTokenizer.from_pretrained(model_args.tokenizer_name_or_path, **tokenizer_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name_or_path, **tokenizer_kwargs)
     else:
         raise ValueError(
             "You are instantiating a new tokenizer from scratch. This is not supported by this script."
@@ -310,12 +313,12 @@ def main():
     # if (len(tokenizer))!=49954:
     #     raise ValueError(f"The vocab size of the tokenizer must be 49954, but found {len(tokenizer)}.\n"
     #                      "Please use Chinese Alpaca tokenizer!")
-    if tokenizer.pad_token is None:
+    if tokenizer.pad_token is None and 'qwen' not in model_args.tokenizer_name_or_path.lower():
         print(f"Adding pad token {DEFAULT_PAD_TOKEN}")
         tokenizer.add_special_tokens(dict(pad_token=DEFAULT_PAD_TOKEN))
 
     logger.info(f"len(tokenizer):{len(tokenizer)}")
-    if data_args.add_words_file:
+    if data_args.add_words_file and 'qwen' not in model_args.tokenizer_name_or_path.lower():
         with open(data_args.add_words_file, encoding='utf8') as f:
             words = [i.strip() for i in f.readlines() if i.strip()]
         tokenizer.add_tokens(words)
