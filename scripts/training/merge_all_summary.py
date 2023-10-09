@@ -8,9 +8,10 @@ from enum import Enum
 import jieba
 import numpy as np
 from tqdm import tqdm
+import os
 from scipy.special import softmax
 from scipy.spatial import distance
-
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 class Method(Enum):
     fuzzywuzzy = 1
     gensim = 2
@@ -216,8 +217,8 @@ if __name__ == '__main__':
 处理意见.其他建议:如症状频繁，则行胃肠镜检查
     '''
     app = ReOrderSummary(
-        merge_regular=r'scripts\training\all_summary_keys\merge_regular.tsv',
-        key_positions=r'scripts\training\all_summary_keys\key_position.txt',
+        merge_regular=os.path.join(PROJECT_ROOT, 'scripts', 'training', 'all_summary_keys', 'merge_regular.tsv'),
+        key_positions=os.path.join(PROJECT_ROOT, 'scripts', 'training', 'all_summary_keys', 'key_position.txt'),
         gensim_model_path=r'E:\bert_models\chinese_word_vector\sgns.baidubaike.bigram-char.bz2', # Method.gensim 时有效
         similary_method=Method.fuzzywuzzy # 
     )

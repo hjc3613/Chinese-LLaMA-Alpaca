@@ -12,8 +12,10 @@ from collections import defaultdict
 from uni_gpt.modeling_unigpt import UniGPTForCausalLM
 from baichuan.tokenization_baichuan import BaichuanTokenizer
 from argparse import ArgumentParser
+import random
+from merge_all_summary import ReOrderSummary, Method
 time_prefix = time.strftime("%Y%m%d",time.localtime(time.time())) 
-
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 # hf_model_path = '/data/hujunchao/models/learn_gpt4_continue_gen_no_blank/checkpoint-25'
@@ -54,6 +56,13 @@ class DecodeInterface:
 
         self.cache = defaultdict(list)
 
+        self.reorder_summary = ReOrderSummary(
+            merge_regular=os.path.join(PROJECT_ROOT, 'scripts', 'training', 'all_summary_keys', 'merge_regular.tsv'),
+            key_positions=os.path.join(PROJECT_ROOT, 'scripts', 'training', 'all_summary_keys', 'key_position.txt'),
+            gensim_model_path=r'E:\bert_models\chinese_word_vector\sgns.baidubaike.bigram-char.bz2', # Method.gensim 时有效
+            similary_method=Method.fuzzywuzzy # 
+        )
+    @torch.no_grad()
     def generate(self, text):
         inputs = self.tokenizer(text, return_tensors='pt').to(self.model.device)
         print('######################### input #################################')
@@ -69,7 +78,7 @@ class DecodeInterface:
                                         num_beams=1,
                                         #repetition_penalty=2.0,
                                         #eos_token_id=tokenizer.eos_token_id,
-                                        num_return_sequences = 1)
+                                        num_return_sequences=1)
 
         sentence = self.tokenizer.decode(generation_output.sequences[0]).replace('<s>', '').replace('</s>', '')
         print('######################### output ###############################')
@@ -81,8 +90,10 @@ class DecodeInterface:
 
     def format_cache_to_input(self, record_id, window=10):
         caches_of_record_id = self.cache.get(record_id, [])
-        pre_summary = '历史所有结论:' + '\n'.join(i[2] for i in caches_of_record_id[:-window] if not re.search(r'当前对话中无法得到确定性信息',i[2]))
+        pre_summary = '\n'.join(i[2] for i in caches_of_record_id[:-window] if not re.search(r'当前对话中',i[2]))
         pre_summary = re.sub(r'\n+', '\n', pre_summary)
+        pre_summary = self.reorder_summary.post_process_abs(pre_summary)
+        pre_summary = '历史所有结论:' + pre_summary
         result = []
         result.append(pre_summary)
         for round, pre_diag, cur_summary in caches_of_record_id[-window:]:
@@ -92,7 +103,7 @@ class DecodeInterface:
     def iter_generate(self, cur, record_id, round, date):
         inputs = self.format_cache_to_input(record_id, window=15)
         inputs = f'就诊日期:{date}\n{inputs}\n{cur}\n结论:\n'
-        res = self.generate(inputs)
+        res = self.generate(inputs).strip()
         self.cache[record_id].append((round, cur, res))
         return res, inputs
 
@@ -105,7 +116,7 @@ class DecodeInterface:
             raise Exception('type 传值错误')
         
 def process_dir(root):
-    excels = [i for i in os.listdir(root) if i.endswith('.xlsx') and '预标' not in i][:]
+    excels = [i for i in os.listdir(root) if i.endswith('.xlsx') and not re.search(r'_tmp|预标', i)][:]
     interface = DecodeInterface(
         hf_model_path='/data/hujunchao/models/insert_summary_baichun_15_newdata/checkpoint-180'
     )
@@ -120,7 +131,7 @@ def process_dir(root):
             res, inputs = interface.process(row, type='iter')
             if '无法得到确定性信息' in res:
                 res = ''
-            row['过程摘要'] = res
+            row['过程摘要_迭代生成'] = res
             result.append({**row})
             
         result = pd.DataFrame.from_dict(result)
@@ -164,12 +175,14 @@ def main(args):
     to_jsonl(result.to_dict(orient='records'), output_file_jsonl)
         
 if __name__ == '__main__':
-    process_dir('/data/hujunchao/record_gen/gpt4_continue_gen_new/pre_label/')
-    # parser = ArgumentParser()
-    # parser.add_argument('--model_path', required=True, type=str)
-    # parser.add_argument('--file', required=True, type=str)
-    # parser.add_argument('--tokenizer_name', required=False, default=None)
-    # parser.add_argument('--decode_type', required=False, default='common')
-    # parser.add_argument('--record_nums', required=False, default=float('inf'))
-    # args = parser.parse_args()
-    # main(args)
+    # process_dir('/data/hujunchao/record_gen/gpt4_continue_gen_new/pre_label/0927数据标注质量验证/20230927梁茜')
+    # process_dir('/data/hujunchao/record_gen/gpt4_continue_gen_new/pre_label/0927数据标注质量验证/20230927翟佳逸')
+    # process_dir('/data/hujunchao/record_gen/gpt4_continue_gen_new/pre_label/0927数据标注质量验证/20230927邵波')
+    parser = ArgumentParser()
+    parser.add_argument('--model_path', required=True, type=str)
+    parser.add_argument('--file', required=True, type=str)
+    parser.add_argument('--tokenizer_name', required=False, default=None)
+    parser.add_argument('--decode_type', required=False, default='common')
+    parser.add_argument('--record_nums', required=False, default=float('inf'))
+    args = parser.parse_args()
+    main(args)
