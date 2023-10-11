@@ -88,30 +88,51 @@ class DecodeInterface:
         print('\n' + '--'*40 + '\n')
         return sentence
 
-    def format_cache_to_input(self, record_id, window=10):
+    def format_cache_to_input(self, record_id, window=10, stream=False):
         caches_of_record_id = self.cache.get(record_id, [])
-        pre_summary = '\n'.join(i[2] for i in caches_of_record_id[:-window] if not re.search(r'当前对话中',i[2]))
+        if stream:
+            print('stream 方式组合历史摘要')
+            # 当缓存中的对话轮数大于window时，需将新的window窗口外的对话摘要放进历史摘要中
+            if len(caches_of_record_id) > window:
+                _, _, new_poped_summary, _ = caches_of_record_id[-(window+1)]
+                if re.search('当前对话中', new_poped_summary):
+                    new_poped_summary = ''
+            else:
+                new_poped_summary = ''
+            # 截至当前为止所有的历史摘要
+            pre_summary = caches_of_record_id[-1][-1] if len(caches_of_record_id)>0 else ''
+            pre_summary = f'{pre_summary}\n{new_poped_summary}'.strip()
+        else:
+            print('非stream方式组合历史摘要')
+            pre_summary = '\n'.join(i[2] for i in caches_of_record_id[:-window] if not re.search(r'当前对话中',i[2]))
         pre_summary = re.sub(r'\n+', '\n', pre_summary)
         pre_summary = self.reorder_summary.post_process_abs(pre_summary)
-        pre_summary = '历史所有结论:' + pre_summary
+        pre_summary_ = '历史所有结论:\n' + pre_summary
         result = []
-        result.append(pre_summary)
-        for round, pre_diag, cur_summary in caches_of_record_id[-window:]:
-            result.append(f'{pre_diag}\n结论:\n{cur_summary or "当前对话中无法得到确定性信息"}')
-        return '\n'.join(result)
+        result.append(pre_summary_)
+        for round, pre_diag, cur_summary, _ in caches_of_record_id[-window:]:
+            result.append(f'{pre_diag}\n结论:{cur_summary or "当前对话中无法得到确定性信息"}')
+        return '\n'.join(result), pre_summary
     
-    def iter_generate(self, cur, record_id, round, date):
-        inputs = self.format_cache_to_input(record_id, window=15)
-        inputs = f'就诊日期:{date}\n{inputs}\n{cur}\n结论:\n'
+    def iter_generate(self, cur, record_id, round, date,stream):
+        inputs, pre_summary = self.format_cache_to_input(record_id, window=15, stream=stream)
+        inputs = f'就诊日期:{date}\n{inputs}\n{cur}\n结论:'
         res = self.generate(inputs).strip()
-        self.cache[record_id].append((round, cur, res))
+        self.cache[record_id].append((round, cur, res, pre_summary))
         return res, inputs
-
-    def process(self, row, type):
+    
+    def get_final_summary(self, record_id):
+        caches_of_record_id = self.cache.get(record_id, [])
+        final_summary = '\n'.join(i[2] for i in caches_of_record_id if not re.search(r'当前对话中',i[2]))
+        final_summary = re.sub(r'\n+', '\n', final_summary)
+        final_summary = self.reorder_summary.post_process_abs(final_summary)
+        return final_summary
+    
+    def process(self, row, type,stream=False):
         if type=='common':
             return self.generate(row['input']), row['input']
         elif type=='iter':
-            return self.iter_generate(row['当前对话'], row['record_id'], row['round'], row['admission_date'])
+            return self.iter_generate(row['当前对话'], row['record_id'], row['round'], row['admission_date'],stream)
         else:
             raise Exception('type 传值错误')
         
@@ -128,7 +149,7 @@ def process_dir(root):
             row = dict(row)
             if 'round' not in row:
                 row['round'] = idx
-            res, inputs = interface.process(row, type='iter')
+            res, inputs = interface.process(row, type='iter',stream=False)
             if '无法得到确定性信息' in res:
                 res = ''
             row['过程摘要_迭代生成'] = res
@@ -147,23 +168,25 @@ def main(args):
         raise Exception('只支持xlsx和jsonl文件')
     if 'admission_date' not in df:
         df['admission_date'] = df['input'].str.findall('(?<=就诊日期:)(.+?)\n').str[0]
-    output_file_excel = f'{args.file.rsplit(".", maxsplit=1)[0]}_{args.decode_type}.xlsx'
-    output_file_jsonl = f'{args.file.rsplit(".", maxsplit=1)[0]}_{args.decode_type}.jsonl'
+    output_file_excel = f'{args.file.rsplit(".", maxsplit=1)[0]}_{args.decode_type}_stream{args.stream}.xlsx'
+    output_file_jsonl = f'{args.file.rsplit(".", maxsplit=1)[0]}_{args.decode_type}_stream{args.stream}.jsonl'
+    output_file_final = f'{args.file.rsplit(".", maxsplit=1)[0]}_{args.decode_type}_stream{args.stream}_final.xlsx'
     print(f'ready to save to {output_file_excel} and {output_file_jsonl}')
     result = []
+    result_final = []
     processed_record_num = set()
     for idx, row in tqdm(df.iterrows(), total=len(df)):
         processed_record_num.add(row['record_id'])
         if len(processed_record_num) > int(args.record_nums):
             break
         row = dict(row)
-        res, inputs = interface.process(row, type=args.decode_type)
+        res, inputs = interface.process(row, type=args.decode_type, stream=eval(args.stream))
         if '无法得到确定性信息' in res:
             res = ''
         row['pred_output'] = res
         row['input_new'] = inputs
         result.append({**row})
-        
+
     result = pd.DataFrame.from_dict(result)
     result['gold_output'] = result['output']
     result.drop('output', axis=1, inplace=True)
@@ -171,9 +194,17 @@ def main(args):
         result['id'] = result['record_id']+'_'+result['round'].astype(str)
     print(f'save to {output_file_excel}')
     result.to_excel(output_file_excel)
-    print(f'save to {output_file_jsonl}')
-    to_jsonl(result.to_dict(orient='records'), output_file_jsonl)
-        
+    # print(f'save to {output_file_jsonl}')
+    # to_jsonl(result.to_dict(orient='records'), output_file_jsonl)
+    for record_id, subdf in result.groupby('record_id'):
+        all_summary_pred = '\n'.join([i for i in subdf['pred_output'] if i and not re.search(r'当前对话中', i)])
+        all_summary_pred = interface.reorder_summary.post_process_abs(all_summary_pred)
+        all_summary_label = '\n'.join([i for i in subdf['gold_output'] if i and not re.search(r'当前对话中', i)])
+        all_summary_label = interface.reorder_summary.post_process_abs(all_summary_label)
+        dialogue = '\n'.join([i for i in subdf['当前对话']])
+        result_final.append({'id':record_id, 'pred_output':all_summary_pred, 'label':all_summary_label, 'dialogue':dialogue})
+    print(f'save to {output_file_final}')
+    pd.DataFrame.from_dict(result_final).to_excel(output_file_final)
 if __name__ == '__main__':
     # process_dir('/data/hujunchao/record_gen/gpt4_continue_gen_new/pre_label/0927数据标注质量验证/20230927梁茜')
     # process_dir('/data/hujunchao/record_gen/gpt4_continue_gen_new/pre_label/0927数据标注质量验证/20230927翟佳逸')
@@ -184,5 +215,6 @@ if __name__ == '__main__':
     parser.add_argument('--tokenizer_name', required=False, default=None)
     parser.add_argument('--decode_type', required=False, default='common')
     parser.add_argument('--record_nums', required=False, default=float('inf'))
+    parser.add_argument('--stream', required=False, default=False)
     args = parser.parse_args()
     main(args)

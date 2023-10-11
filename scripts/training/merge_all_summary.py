@@ -8,9 +8,11 @@ from enum import Enum
 import jieba
 import numpy as np
 from tqdm import tqdm
+import sys
 import os
 from scipy.special import softmax
 from scipy.spatial import distance
+import pandas as pd
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 class Method(Enum):
     fuzzywuzzy = 1
@@ -222,3 +224,13 @@ if __name__ == '__main__':
         similary_method=Method.fuzzywuzzy # 
     )
     print(app.post_process_abs(all_abstract))
+    input_excel = sys.argv[1]
+    output_excel = sys.argv[2]
+    df_input = pd.read_excel(input_excel)
+    result_final = []
+    for record_id, subdf in df_input.groupby('record_id'):
+        all_summary_pred = '\n'.join([i for i in subdf['pred_output'] if i and not re.search(r'当前对话中', i)])
+        all_summary_pred = app.reorder_summary.post_process_abs(all_summary_pred)
+        all_summary_label = '\n'.join([i for i in subdf['gold_output'] if i and not re.search(r'当前对话中', i)])
+        result_final.append({'id':record_id, 'pred_output':all_summary_pred, 'label':all_summary_label})
+    pd.DataFrame.from_dict(result_final).to_excel(output_excel)

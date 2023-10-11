@@ -33,7 +33,7 @@ from transformers.utils import add_start_docstrings, add_start_docstrings_to_mod
 from .configuration_unigpt import UniGPTConfig
 ##### tmp ##########
 from transformers import LlamaTokenizer
-tokenizer = LlamaTokenizer.from_pretrained('/baykal/unisound/jianglei/models/plm_models/unigpt2-medical-v030100_med_hf_0625/')
+# tokenizer = LlamaTokenizer.from_pretrained('/baykal/unisound/jianglei/models/plm_models/unigpt2-medical-v030100_med_hf_0625/')
 ####################
 logger = logging.get_logger(__name__)
 

@@ -12,7 +12,7 @@ lora_dropout=0.1
 ROOT="/data/hujunchao"
 # pretrained_model="${ROOT}/medical_record_gen/ckp_chinese_llama_all_param_84训练集_混合训练/checkpoint-64"
 pretrained_model="${ROOT}/models/Baichuan2-13B-Chat"
-strategy=baichuan_histrounds15_filteroutthreash0.06/
+strategy=insert_summary_baichu_15_0.1
 dataset_dir=${ROOT}/record_gen/gpt4_continue_gen_new/${strategy}/train.jsonl
 validation_file=${ROOT}/record_gen/gpt4_continue_gen_new/${strategy}/test.jsonl
 per_device_train_batch_size=2
@@ -22,8 +22,8 @@ output_dir=${ROOT}/models/${strategy}
 # peft_model=path/to/peft/model/dir
 
 RANDOM=42
-# deepspeed_config_file=ds_zero2_no_offload.json
-deepspeed_config_file=deepspeed_stage2.config
+deepspeed_config_file=ds_zero2_no_offload.json
+# deepspeed_config_file=deepspeed_stage2.config
 
 # torchrun --nnodes 1 --nproc_per_node 8 run_clm_sft_with_peft.py \
 # python run_clm_sft_with_peft.py \
